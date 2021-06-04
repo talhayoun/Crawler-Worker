@@ -1,5 +1,5 @@
 const cheerio = require("cheerio");
-let { getMessageFromQueue, createMessageToQueue, deleteMessageFromQueue, deleteQueue } = require("../middleware/aws-sqs");
+let { getMessageFromQueue, createMessageToQueue, deleteMessageFromQueue, deleteQueue, getQueueAttributes } = require("../middleware/aws-sqs");
 const redisClient = require("../db/redis");
 const axios = require("axios");
 
@@ -24,8 +24,40 @@ const getPageTitleAndLinks = async function (URL) {
 
 let insertLinksToQueue = async function (links, queueURL, id, queueName, depth) {
     for (let i = 0; i < links.length; i++) {
+        let pendingDepthIncrease = await checkPendingDepthIncrease(queueName);
+        let { data } = await getQueueAttributes(queueURL);
+        if (data) {
+            let numOfMessage = parseInt(data.numOfMessage);
+            let numOfMessagesNotVisible = parseInt(data.numOfMessagesNotVisible);
+            let numOfMessagesDelayed = parseInt(data.numOfMessagesDelayed);
+            if (pendingDepthIncrease) {
+                await setNumOfNodes(numOfMessage + numOfMessagesDelayed + numOfMessagesNotVisible)
+            }
+        }
         await createMessageToQueue(links[i], queueURL, `${id}/${i}`, queueName, depth)
     }
+}
+
+const setNumOfNodes = async function (queueName, numOfNodes) {
+    let tree = await redisGetTree(queueName);
+    tree.numOfNodes = numOfNodes;
+    tree.pendingDepthIncrease = false;
+    await insertTreeToRedis(tree, queueName);
+}
+
+let insertTreeToRedis = async function (tree, queueName) {
+    console.log("------------- INSERTING TREE TO REDIS -------------------")
+    let stringfyTree = JSON.stringify(tree)
+    await redisClient.setexAsync(queueName, 1800, stringfyTree)
+}
+
+const checkPendingDepthIncrease = async function (queueName) {
+    let tree = await redisGetTree(queueName);
+    if (tree) {
+        return tree.pendingDepthIncrease;
+    }
+
+    return false;
 }
 
 
@@ -51,6 +83,11 @@ const checkMaxDepthAndMaxPages = async function (queueName, currentDepth) {
     return false
 }
 
+const getTreeDepth = async function (queueName) {
+    let tree = await redisGetTree(queueName);
+    return tree.currentDepth;
+}
+
 const startWorkerJob = async function (req, res, next) {
     let message = await getMessageFromQueue(10, req.body.QueueURL);
 
@@ -72,6 +109,12 @@ const startWorkerJob = async function (req, res, next) {
             } else {
                 let queueName = message[i].MessageAttributes.queueName.StringValue;
                 currentDepth = message[i].MessageAttributes.depth.StringValue;
+                let treeCurrentDepth = await getTreeDepth(queueName)
+                let currentDepthMinusTreeCurrentDepth = currentDepth - parseInt(treeCurrentDepth);
+                if (currentDepthMinusTreeCurrentDepth == 1 && !checkPendingDepthIncrease(queueName)) {
+                    return;
+                }
+
                 let isReachedDepthOrPages = await checkMaxDepthAndMaxPages(queueName, currentDepth);
                 if (isReachedDepthOrPages) {
                     console.log("REACHED MAX EDPTH OR PAGES")
