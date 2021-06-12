@@ -2,6 +2,7 @@ const cheerio = require("cheerio");
 let { getMessageFromQueue, createMessageToQueue, deleteMessageFromQueue, deleteQueue, getQueueAttributes } = require("../middleware/aws-sqs");
 const redisClient = require("../db/redis");
 const axios = require("axios");
+const { BinarySearchTree } = require("../utils/queue");
 
 const getPageTitleAndLinks = async function (URL) {
     let page = await axios.get(URL)
@@ -88,6 +89,27 @@ const getTreeDepth = async function (queueName) {
     return tree.currentDepth;
 }
 
+const BFSTraverse = async function (id, queueName) {
+    console.log("BFSSSSS")
+    let tree = await redisGetTree(queueName);
+    let newBinaryTree = new BinarySearchTree(tree.root);
+    let ids = newBinaryTree.bfsTraverse(id);
+    console.log(ids, "ids")
+
+    for (let i = 1; i < ids.length; i++) {
+        let idsArray = ids[i].split("/");
+        let currentNode = tree.root;
+        for (let g = 1; g < idsArray.length; g++) {
+            currentNode = currentNode.children[idsArray[g]];
+            if (currentNode.title == undefined) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+
 const startWorkerJob = async function (req, res, next) {
     let message = await getMessageFromQueue(10, req.body.QueueURL);
 
@@ -109,6 +131,11 @@ const startWorkerJob = async function (req, res, next) {
             } else {
                 let queueName = message[i].MessageAttributes.queueName.StringValue;
                 currentDepth = message[i].MessageAttributes.depth.StringValue;
+                let wasPreviousChildrenScraped = await BFSTraverse(id, queueName);
+                if (!wasPreviousChildrenScraped) {
+                    console.log("They weren't scrapedd")
+                    return;
+                }
                 let treeCurrentDepth = await getTreeDepth(queueName)
                 let currentDepthMinusTreeCurrentDepth = currentDepth - parseInt(treeCurrentDepth);
                 if (currentDepthMinusTreeCurrentDepth == 1 && !checkPendingDepthIncrease(queueName)) {
